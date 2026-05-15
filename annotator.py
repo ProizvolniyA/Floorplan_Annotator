@@ -1,17 +1,26 @@
 import cv2
 import os
 from pathlib import Path
+from config_loader import get_config
+
+# --- CONFIG & PATHS ---
+cfg = get_config() 
+IMAGE_DIR = Path(cfg['images_path'])  
+LABEL_DIR = Path(cfg['labels_path']) 
+
+if not IMAGE_DIR.exists():
+    raise FileNotFoundError(f"Folder not found: {IMAGE_DIR}")
+
+LABEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- SETTINGS ---
-IMAGE_DIR = Path('/floorplans')    #please, change directory  
-LABEL_DIR = Path('/f_labels')      #please, change directory
 CLASSES = [
     "wc", "sink", "shower", "bath", "counter", "stove", "table", 
     "bed", "closet", "tv", "coffee_table", "fan", "co", "sd",
     "door_icon", "window_icon", "door", "window"
 ]    
 
-LABEL_DIR.mkdir(parents=True, exist_ok=True)
+MIN_BBOX_SIZE = 5 
 
 drawing = False
 ix, iy = -1, -1
@@ -34,18 +43,33 @@ def calculate_yolo_format(img_w, img_h, box):
 
 def load_existing_annotations(txt_path, img_w, img_h):
     loaded_boxes = []
-    if not txt_path.exists(): return loaded_boxes
+    if not txt_path.exists(): 
+        return loaded_boxes
+    
     with open(txt_path, 'r') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 5:
+        for line_idx, line in enumerate(f, 1):
+            line = line.strip()
+            if not line: continue
+            
+            parts = line.split()
+            if len(parts) != 5:
+                print(f"\n[ERROR] Invalid format in {txt_path.name} at line {line_idx}.")
+                raise ValueError(f"Format error in {txt_path.name}")
+
+            try:
                 cls_id = int(parts[0])
                 x_center, y_center, width, height = map(float, parts[1:])
+                
                 w_pix, h_pix = width * img_w, height * img_h
                 x_c_pix, y_c_pix = x_center * img_w, y_center * img_h
                 xmin, ymin = int(x_c_pix - w_pix / 2), int(y_c_pix - h_pix / 2)
                 xmax, ymax = int(x_c_pix + w_pix / 2), int(y_c_pix + h_pix / 2)
+                
                 loaded_boxes.append((cls_id, xmin, ymin, xmax, ymax))
+            except ValueError:
+                print(f"\n[ERROR] Corrupted data in {txt_path.name} at line {line_idx}.")
+                raise ValueError(f"Numeric data error in {txt_path.name}")
+                
     return loaded_boxes
 
 def redraw_all():
@@ -75,9 +99,15 @@ def draw_bbox(event, x, y, flags, param):
             
     elif event == cv2.EVENT_RBUTTONUP:
         drawing = False
-        bboxes.append((current_class_id, ix, iy, x, y))
-        redraw_all() 
-    
+        width = abs(x - ix)
+        height = abs(y - iy)
+        
+        if width > MIN_BBOX_SIZE and height > MIN_BBOX_SIZE:
+            bboxes.append((current_class_id, ix, iy, x, y))
+            redraw_all() 
+        else:
+            current_img = clone_img.copy()
+
 def main():
     global current_img, clone_img, base_img, bboxes, current_class_id
     
@@ -90,10 +120,10 @@ def main():
     cv2.setMouseCallback('Annotator', draw_bbox)
 
     print("\n=== ANNOTATOR CONTROLS ===")
-    print("ПКМ - Draw bbox")
+    print("RMB - Draw bbox")
     print("w,s - Change object class")
     print("d   - Save and Next image")
-    print("a   - Previous image")
+    print("a   - Save and Previous image")
     print("z   - Undo last bbox")
     print("c   - Clear current image annotations")
     print("q   - Quit")
@@ -111,13 +141,21 @@ def main():
             continue
             
         img_h, img_w = base_img.shape[:2]
-        bboxes = load_existing_annotations(txt_path, img_w, img_h)
+        
+        try:
+            bboxes = load_existing_annotations(txt_path, img_w, img_h)
+        except ValueError as e:
+            print(f"Skipping image due to error: {e}")
+            img_idx += 1
+            continue
+
         redraw_all()
         
         while True:
             display_img = current_img.copy()
-            cv2.putText(display_img, f"Class: {CLASSES[current_class_id]}", (20, 40), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+            cv2.rectangle(display_img, (0, 0), (900, 100), (30, 30, 30), -1)
+            cv2.putText(display_img, f"Class: {CLASSES[current_class_id]}", (30, 70), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 5)
             
             cv2.imshow('Annotator', display_img)
             key = cv2.waitKey(20) & 0xFF
@@ -126,36 +164,23 @@ def main():
                 current_class_id = (current_class_id - 1) % len(CLASSES)
             elif key == ord('s'):
                 current_class_id = (current_class_id + 1) % len(CLASSES)
-            
             elif key == ord('z'): 
-                if bboxes:
-                    bboxes.pop()
-                    redraw_all()
-                    print("Last bbox removed.")
-
+                if bboxes: bboxes.pop(); redraw_all()
             elif key == ord('c'):
-                bboxes = []
-                redraw_all()
-                print("Annotation cleared.")
-                
-            elif key == ord('d'):
+                bboxes = []; redraw_all()
+            elif key in [ord('d'), ord('a')]:
                 with open(txt_path, 'w') as f:
                     for box in bboxes:
                         f.write(calculate_yolo_format(img_w, img_h, box) + '\n')
-                print(f"✅ Saved: {txt_path.name}")
-                img_idx += 1
-                break
                 
-            elif key == ord('a'):
-                img_idx = max(0, img_idx - 1)
+                if key == ord('d'):
+                    img_idx += 1
+                else:
+                    img_idx = max(0, img_idx - 1)
                 break
-                
             elif key == ord('q'):
                 cv2.destroyAllWindows()
                 return
-
-if __name__ == '__main__':
-    main()
 
 if __name__ == '__main__':
     main()
