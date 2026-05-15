@@ -1,0 +1,4 @@
+#Please, change your paths
+images_path: "/.../images"
+labels_path: "/.../labels"
+geom_path: "/.../geom"
